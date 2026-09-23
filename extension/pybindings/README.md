@@ -8,11 +8,12 @@ This Python module, named `portable_lib`, provides a set of functions and classe
 pip install . --no-build-isolation
 ```
 
-## Lightweight Tensor API
+## Tensor API without ATen
 
-In addition to `torch.Tensor`, the bindings accept `portable_lib.Tensor`, a
-lightweight CPU tensor that can be created from a NumPy array or nested Python
-list:
+Build with `-DEXECUTORCH_PYBIND_USE_ATEN=OFF` to remove the ATen and PyTorch
+library dependency from the bindings. In this configuration, tensor inputs and
+outputs use `portable_lib.Tensor`, which can be created from a NumPy array or a
+nested Python list:
 
 ```python
 import numpy as np
