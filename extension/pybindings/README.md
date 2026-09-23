@@ -8,6 +8,29 @@ This Python module, named `portable_lib`, provides a set of functions and classe
 pip install . --no-build-isolation
 ```
 
+## Lightweight Tensor API
+
+In addition to `torch.Tensor`, the bindings accept `portable_lib.Tensor`, a
+lightweight CPU tensor that can be created from a NumPy array or nested Python
+list:
+
+```python
+import numpy as np
+from executorch.extension.pybindings import portable_lib
+
+x = portable_lib.Tensor(np.ones((2, 2), dtype=np.float32))
+y = portable_lib.Tensor([[1, 2], [3, 4]], dtype=np.float32)
+output = module((x, y))[0]
+result = output.numpy()
+```
+
+ATen-enabled builds accept both `torch.Tensor` and `portable_lib.Tensor` through
+the same methods. Tensor outputs use the lightweight type when a lightweight
+input is provided, including for mixed input lists; existing calls containing
+only `torch.Tensor` inputs continue to return `torch.Tensor`. Lightweight tensor
+outputs are always copied, so `clone_outputs` only affects `torch.Tensor`
+outputs.
+
 # Link Backends
 
 Not all backends are built into the pip wheel by default. You can link these missing/experimental backends by turning on the corresponding cmake flag. For example, to include the Vulkan backend:
