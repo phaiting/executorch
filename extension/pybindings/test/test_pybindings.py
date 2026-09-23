@@ -27,6 +27,7 @@ from executorch.extension.pybindings.test.make_test import (
     ModuleAddWithAttributes,
     ModuleChannelsLast,
     ModuleChannelsLastInDefaultOut,
+    ModuleChannelsLastSingleChannel,
     ModuleLinear,
     ModuleMulti,
 )
@@ -90,6 +91,39 @@ class PybindingsTest(unittest.TestCase):
         np.testing.assert_array_equal(
             tensor.numpy(), np.array([[1, 2], [3, 4]], dtype=np.float32)
         )
+
+    def test_lightweight_tensor_dim_order(self):
+        array = np.arange(2 * 3 * 4 * 5, dtype=np.float32).reshape(2, 3, 4, 5)
+        tensor = self.runtime.Tensor(array, dim_order=(0, 2, 3, 1))
+
+        self.assertEqual(tensor.dim_order(), (0, 2, 3, 1))
+        self.assertEqual(tensor.strides(), (60, 1, 15, 3))
+        np.testing.assert_array_equal(tensor.numpy(), array)
+
+        numpy_copy = tensor.numpy()
+        numpy_copy[0, 0, 0, 0] = -1
+        self.assertEqual(tensor.numpy()[0, 0, 0, 0], array[0, 0, 0, 0])
+
+    def test_lightweight_tensor_rejects_invalid_dim_order(self):
+        array = np.ones((2, 3), dtype=np.float32)
+
+        with self.assertRaisesRegex(ValueError, "must be a permutation"):
+            self.runtime.Tensor(array, dim_order=(0, 0))
+        with self.assertRaisesRegex(ValueError, "one entry per dimension"):
+            self.runtime.Tensor(array, dim_order=(0,))
+
+    def test_lightweight_tensor_device(self):
+        device = self.runtime.Device(self.runtime.DeviceType.CPU, 0)
+        tensor = self.runtime.Tensor([1, 2], device=device)
+
+        self.assertEqual(device.type(), self.runtime.DeviceType.CPU)
+        self.assertTrue(device.is_cpu())
+        self.assertEqual(device.index(), 0)
+        self.assertEqual(tensor.device(), device)
+        self.assertEqual(
+            hash(device), hash(self.runtime.Device(self.runtime.DeviceType.CPU))
+        )
+        self.assertEqual(repr(device), "Device(type='cpu', index=0)")
 
     def test_lightweight_tensor_single_input(self):
         exported_program, inputs = create_program(ModuleAddSingleInput())
@@ -243,6 +277,36 @@ class PybindingsTest(unittest.TestCase):
 
         expected = model(inputs[0])
         self.assertTrue(torch.allclose(expected, executorch_output))
+
+    def test_lightweight_tensor_channels_last(self) -> None:
+        model = ModuleChannelsLast()
+        exported_program, inputs = create_program(model)
+        lightweight_input = self.runtime.Tensor(
+            inputs[0].numpy(), dim_order=(0, 2, 3, 1)
+        )
+
+        executorch_module = self.load_fn(exported_program.buffer)
+        output = executorch_module(lightweight_input)[0]
+
+        self.assertIsInstance(output, self.runtime.Tensor)
+        self.assertEqual(output.dim_order(), (0, 2, 3, 1))
+        np.testing.assert_allclose(output.numpy(), model(inputs[0]).numpy())
+
+    def test_lightweight_tensor_channels_last_single_channel(self) -> None:
+        model = ModuleChannelsLastSingleChannel()
+        exported_program, inputs = create_program(model)
+        lightweight_input = self.runtime.Tensor(
+            inputs[1].numpy(), dim_order=(0, 2, 1, 3)
+        )
+
+        executorch_module = self.load_fn(exported_program.buffer)
+        output = executorch_module((inputs[0], lightweight_input))[0]
+
+        self.assertIsInstance(output, self.runtime.Tensor)
+        if self.kernel_mode == "aten":
+            self.assertEqual(output.dim_order(), (0, 1, 2, 3))
+            self.assertEqual(output.strides(), (9, 1, 3, 1))
+        np.testing.assert_allclose(output.numpy(), inputs[0].numpy())
 
     def test_unsupported_dim_order(self) -> None:
         model = ModuleChannelsLast()

@@ -25,6 +25,22 @@ output = module((x, y))[0]
 result = output.numpy()
 ```
 
+The lightweight tensor uses the same dense dimension-order and device metadata
+as an ExecuTorch tensor. For example, a channels-last tensor can be constructed
+without PyTorch as follows:
+
+```python
+x = portable_lib.Tensor(
+    np.ones((1, 2, 3, 4), dtype=np.float32),
+    dim_order=(0, 2, 3, 1),
+    device=portable_lib.Device(portable_lib.DeviceType.CPU),
+)
+assert x.strides() == (24, 1, 8, 2)
+```
+
+Non-CPU construction uses the registered ExecuTorch allocator for that device.
+Calling `numpy()` returns a host copy for tensors on every device.
+
 ATen-enabled builds accept both `torch.Tensor` and `portable_lib.Tensor` through
 the same methods. Tensor outputs use the lightweight type when a lightweight
 input is provided, including for mixed input lists; existing calls containing

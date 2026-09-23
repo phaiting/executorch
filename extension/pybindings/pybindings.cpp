@@ -105,6 +105,9 @@ using ::executorch::runtime::prof_result_t;
 using ::executorch::runtime::Result;
 using ::executorch::runtime::Span;
 using ::executorch::runtime::Tag;
+using ::executorch::runtime::etensor::Device;
+using ::executorch::runtime::etensor::DeviceIndex;
+using ::executorch::runtime::etensor::DeviceType;
 using torch::executor::etdump_result;
 using torch::executor::ETDumpGen;
 
@@ -397,22 +400,68 @@ PyTensorScalarType from_runtime_scalar_type(executorch::aten::ScalarType type) {
   }
 }
 
-std::shared_ptr<PyTensor> make_py_tensor(
-    const executorch::aten::Tensor& tensor) {
-  if (!tensor.device().is_cpu()) {
-    throw std::runtime_error(
-        "Lightweight Tensor outputs currently support CPU tensors only");
-  }
-  std::vector<uint8_t> dim_order;
+Device runtime_device(const executorch::aten::Tensor& tensor) {
 #ifdef USE_ATEN_LIB
-  dim_order.resize(tensor.dim());
-  for (size_t i = 0; i < dim_order.size(); ++i) {
-    dim_order[i] = static_cast<uint8_t>(i);
+  const auto device = tensor.device();
+  if (device.is_cpu()) {
+    return Device(DeviceType::CPU);
+  }
+  if (device.is_cuda()) {
+    return Device(
+        DeviceType::CUDA,
+        device.has_index() ? static_cast<DeviceIndex>(device.index()) : 0);
+  }
+  throw std::runtime_error(
+      "Lightweight Tensor does not support this output device type");
+#else
+  return tensor.device();
+#endif
+}
+
+#ifdef USE_ATEN_LIB
+at::Device aten_device(Device device) {
+  switch (device.type()) {
+    case DeviceType::CPU:
+      return at::Device(at::kCPU);
+    case DeviceType::CUDA:
+      return at::Device(at::kCUDA, device.index());
+  }
+  throw std::runtime_error(
+      "Lightweight Tensor does not support this input device type");
+}
+
+std::vector<uint8_t> infer_dim_order(const at::Tensor& tensor) {
+  std::vector<uint8_t> ordered_non_singleton_dims;
+  std::vector<bool> singleton_positions(tensor.dim(), false);
+  for (size_t i = 0; i < tensor.dim(); ++i) {
+    if (tensor.size(i) == 1) {
+      singleton_positions[i] = true;
+    } else {
+      ordered_non_singleton_dims.push_back(static_cast<uint8_t>(i));
+    }
   }
   std::stable_sort(
-      dim_order.begin(), dim_order.end(), [&tensor](uint8_t a, uint8_t b) {
+      ordered_non_singleton_dims.begin(),
+      ordered_non_singleton_dims.end(),
+      [&tensor](uint8_t a, uint8_t b) {
         return tensor.stride(a) > tensor.stride(b);
       });
+
+  std::vector<uint8_t> dim_order(tensor.dim());
+  auto next_non_singleton = ordered_non_singleton_dims.begin();
+  for (size_t i = 0; i < dim_order.size(); ++i) {
+    dim_order[i] = singleton_positions[i] ? static_cast<uint8_t>(i)
+                                          : *next_non_singleton++;
+  }
+  return dim_order;
+}
+#endif
+
+std::shared_ptr<PyTensor> make_py_tensor(
+    const executorch::aten::Tensor& tensor) {
+  std::vector<uint8_t> dim_order;
+#ifdef USE_ATEN_LIB
+  dim_order = infer_dim_order(tensor);
 #else
   dim_order.assign(tensor.dim_order().begin(), tensor.dim_order().end());
 #endif
@@ -422,7 +471,8 @@ std::shared_ptr<PyTensor> make_py_tensor(
       std::vector<int64_t>(tensor.sizes().begin(), tensor.sizes().end()),
       std::vector<int64_t>(tensor.strides().begin(), tensor.strides().end()),
       dim_order,
-      from_runtime_scalar_type(tensor.scalar_type()));
+      from_runtime_scalar_type(tensor.scalar_type()),
+      runtime_device(tensor));
 }
 
 inline py::list evalues_to_py_list(
@@ -946,8 +996,9 @@ struct PyModule final {
             portable_tensor->mutable_data(),
             sizes,
             strides,
-            at::TensorOptions().dtype(
-                to_runtime_scalar_type(portable_tensor->scalar_type())));
+            at::TensorOptions()
+                .dtype(to_runtime_scalar_type(portable_tensor->scalar_type()))
+                .device(aten_device(portable_tensor->device_data())));
         cpp_inputs.emplace_back(at_tensor);
 #else
         const auto& portable_tensor = portable_inputs.back();
@@ -967,7 +1018,9 @@ struct PyModule final {
             portable_tensor->mutable_data(),
             input_dim_order.back().data(),
             input_strides.back().data(),
-            executorch::aten::TensorShapeDynamism::STATIC);
+            executorch::aten::TensorShapeDynamism::STATIC,
+            portable_tensor->device_data().type(),
+            portable_tensor->device_data().index());
         cpp_inputs.emplace_back(torch::executor::Tensor(&input_tensors.back()));
 #endif
 #ifdef EXECUTORCH_PYBIND_USE_ATEN
@@ -1499,8 +1552,9 @@ struct PyMethod final {
             portable_tensor->mutable_data(),
             sizes,
             strides,
-            at::TensorOptions().dtype(
-                to_runtime_scalar_type(portable_tensor->scalar_type())));
+            at::TensorOptions()
+                .dtype(to_runtime_scalar_type(portable_tensor->scalar_type()))
+                .device(aten_device(portable_tensor->device_data())));
         cpp_inputs.emplace_back(at_tensor);
 #else
         const auto& portable_tensor = portable_inputs_.back();
@@ -1517,6 +1571,7 @@ struct PyMethod final {
                 .dim_order(std::vector<uint8_t>(
                     portable_tensor->dim_order_data().begin(),
                     portable_tensor->dim_order_data().end()))
+                .device(portable_tensor->device_data())
                 .dynamism(executorch::aten::TensorShapeDynamism::STATIC)
                 .make_tensor_ptr();
         portable_tensor_ptrs_.push_back(std::move(tensor));
@@ -2089,14 +2144,50 @@ PYBIND11_MODULE(EXECUTORCH_PYTHON_MODULE_NAME, m) {
       },
       call_guard);
 
+  py::enum_<DeviceType>(m, "DeviceType")
+      .value("CPU", DeviceType::CPU)
+      .value("CUDA", DeviceType::CUDA);
+
+  py::class_<Device>(m, "Device")
+      .def(
+          py::init<DeviceType, DeviceIndex>(),
+          py::arg("type"),
+          py::arg("index") = 0)
+      .def("type", &Device::type, call_guard)
+      .def("is_cpu", &Device::is_cpu, call_guard)
+      .def("index", &Device::index, call_guard)
+      .def(
+          "__eq__",
+          [](Device self, Device other) { return self == other; },
+          py::is_operator())
+      .def(
+          "__hash__",
+          [](Device device) {
+            return py::hash(py::make_tuple(
+                static_cast<int>(device.type()), device.index()));
+          })
+      .def(
+          "__repr__",
+          [](Device device) { return device_repr(device); },
+          call_guard);
+
   py::class_<PyTensor, std::shared_ptr<PyTensor>>(m, "Tensor")
       .def(
-          py::init<const py::object&, const py::object&>(),
+          py::init<
+              const py::object&,
+              const py::object&,
+              const py::object&,
+              Device>(),
           py::arg("data"),
           py::arg("dtype") = py::none(),
+          py::arg("dim_order") = py::none(),
+          py::arg("device") = Device(DeviceType::CPU),
           call_guard)
       .def("numpy", &PyTensor::numpy, call_guard)
       .def("sizes", &PyTensor::sizes, call_guard)
+      .def("strides", &PyTensor::strides, call_guard)
+      .def("dim_order", &PyTensor::dim_order, call_guard)
+      .def("device", &PyTensor::device, call_guard)
       .def("dtype", &PyTensor::dtype, call_guard)
       .def("nbytes", &PyTensor::nbytes, call_guard)
       .def("__repr__", &PyTensor::repr, call_guard);

@@ -26,6 +26,10 @@ class PybindingsNoAtenTest(unittest.TestCase):
             np.array([[1, 2], [3, 4]], dtype=np.int32),
         )
 
+    def test_missing_device_allocator(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "No allocator is registered"):
+            runtime.Tensor([1, 2], device=runtime.Device(runtime.DeviceType.CUDA))
+
 
 if __name__ == "__main__":
     unittest.main()
